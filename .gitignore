@@ -42,3 +42,6 @@ next-env.d.ts
 
 # Sentry Config File
 .env.sentry-build-plugin
+
+# Claude Code local settings (personal overrides, not team-wide)
+.claude/settings.local.json
