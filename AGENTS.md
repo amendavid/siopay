@@ -174,11 +174,14 @@ Les fichiers générés vont dans `components/ui/`. Ne pas les modifier manuelle
 Quand Supabase sera installé :
 - Region : `eu-central-1` (Frankfurt)
 - Toutes les tables en `snake_case`
-- Chaque table a `id uuid primary key default gen_random_uuid()`, `created_at timestamptz default now()`, `updated_at timestamptz default now()`
+- Chaque table a `id uuid primary key default gen_random_uuid()`, `created_at timestamptz default now()`, `updated_at timestamptz default now()` — **exception** : une table de référence dont la clé technique est aussi la clé métier utilisée ailleurs dans le schéma (ex. `currencies.code`, `countries.code`, `gateways.code`, `processors.code`) utilise cette clé comme `primary key text`, sans `id uuid` séparé qui ne serait jamais référencé. Ne s'applique pas aux tables métier (clients, transactions...) ni aux tables de référence sans clé naturelle stable (`payment_methods`, par exemple, garde `id uuid`).
+- **Choix `on delete cascade` vs `restrict` sur une FK** : `cascade` pour une table sans valeur indépendante de son parent et sans historique financier/d'usage propre (ex. une page de vente n'a plus de sens sans son lien de paiement, un compteur de visites n'a plus de sens sans sa cible). `restrict` dès qu'une table porte elle-même une preuve financière ou d'usage (transactions, livraisons, utilisations de code promo...), ou que la cascade pourrait traverser silencieusement jusqu'à une telle preuve en remontant la chaîne de FK. **Effet d'enchaînement à anticiper, pas un bug** : un `cascade` en amont peut être bloqué par un `restrict` plus loin dans la chaîne — ex. supprimer un espace cascade en théorie vers ses clients, mais un client qui a un historique d'achat bloque via le `restrict` posé sur les sessions de checkout qui le référencent, donc la suppression de l'espace échoue dans son ensemble. C'est le mécanisme de protection voulu : le `cascade` en amont ne "s'active" réellement que pour les lignes sans historique, le `restrict` en aval fait le vrai travail. Toute nouvelle table doit choisir consciemment entre les deux selon ce principe, pas par défaut ou par analogie approximative avec la table la plus proche.
+- **Colonne `text` contrainte — trois stratégies, à choisir consciemment** : vocabulaire métier fermé et stable, rarement amené à grossir → `text` + `check` sur une liste de valeurs (ex. `payment_mode`, les colonnes `status`). Valeur qui porte des métadonnées propres (nom affiché, logo, statut actif...) et/ou qui vit sur `transactions` (la table la plus sensible, où l'intégrité relationnelle prime sur la friction d'une migration) → `text` + FK vers une vraie table de référence. Liste ouverte, explicitement pensée pour grossir sans jamais toucher au schéma (nouveau gateway, nouveau template, nouveau type d'événement) → `text` seul, sans `check` ni FK, validé côté app contre un registre de code — un `check`/une FK y figerait une liste qui doit au contraire rester extensible par un simple ajout de code.
 - RLS activé sur toutes les tables dès la création — jamais désactivé
-- Isolation vendeur via RLS : toutes les requêtes filtrées sur `seller_id = auth.uid()`
+- Isolation vendeur via RLS : les tables métier (`customers`, `offers`, `payment_links`, `sales_pages`, `checkout_sessions`, `transactions`, `events`, `deliveries`, `gateway_credentials`, `integrations`...) se rattachent à `space_id`, pas directement à un compte — `space_id` remonte à `spaces.account_id → accounts.user_id = auth.uid()` via la fonction `private.user_owns_space(space_id)` (voir `docs/schema-design-notes.md`). `accounts` elle-même est la seule table dont la policy compare directement `user_id = auth.uid()`, sans intermédiaire. **RLS couvre la lecture, pas l'écriture** : toutes les policies sont `for select` — aucune `for all`/`with check`. Aucun client navigateur n'écrit en authentifié direct (architecture à deux clients : `createServerClient()` service role côté serveur, `createBrowserClient()` anon côté client, sans client "navigateur authentifié en écriture") ; toute écriture passe par le service role depuis une Server Action, avec l'ownership vérifié côté application avant l'appel — RLS n'est ici qu'un filet de sécurité en lecture contre une fuite accidentelle, pas le mécanisme d'accès primaire.
 - Migrations via Supabase CLI (`supabase migration new <nom>`) — jamais de modification de schéma hors migration
 - Les secrets Supabase (service role key) ne sont accessibles que côté serveur, jamais exposés au client
+- **Toute table qui stocke un secret externe** (clé API d'une passerelle de paiement, jeton d'accès d'un outil tiers connecté, et toute future variante du même besoin) suit le même pattern : les champs du secret sont assemblés en un objet JSON structuré, puis chiffré **comme un bloc unique** dans une colonne `bytea` nommée `credentials_encrypted` — jamais une colonne en clair par type de clé (`api_key`, `secret_key`... en clair côté schéma). Chiffrement applicatif via `libsodium-wrappers` (`lib/crypto/encrypt.ts`), clé dans la variable d'environnement serveur `ENCRYPTION_KEY` (jamais en base, jamais versionnée — détails dans « Variables d'environnement »). RLS activée sans aucune policy pour `anon`/`authenticated` : accès exclusivement service role, y compris pour l'affichage dashboard des métadonnées non sensibles de la même table. Appliqué à ce jour à `gateway_credentials` et `integrations` — toute table future de ce type doit suivre ce même pattern sans qu'il faille le repréciser.
 
 ---
 
@@ -188,10 +191,32 @@ Quand Supabase sera installé :
 |---|---|---|
 | `SENTRY_AUTH_TOKEN` | Upload des source maps au build | Oui — dans `.env.sentry-build-plugin` uniquement |
 | `NEXT_PUBLIC_SENTRY_DSN` | DSN Sentry (client, serveur, edge) | Non (public) — dans `.env.local` |
+| `NEXT_PUBLIC_SUPABASE_URL` | URL du projet Supabase (`https://<ref>.supabase.co`) | Non (public) — dans `.env.local` |
+| `NEXT_PUBLIC_SUPABASE_ANON_KEY` | Clé anon/public Supabase, utilisée par `createBrowserClient()` | Non (public, protégée par RLS) — dans `.env.local` |
+| `SUPABASE_SERVICE_ROLE_KEY` | Clé service role Supabase, utilisée par `createServerClient()` — bypasse RLS | Oui — serveur uniquement, jamais exposée au client |
+| `SUPABASE_DB_PASSWORD` | Mot de passe Postgres du projet, requis par la CLI (`supabase link`, `supabase db push`) | Oui — serveur/CLI uniquement |
+| `SUPABASE_ACCESS_TOKEN` | Token d'accès personnel Supabase, authentifie la CLI sans `supabase login` interactif | Oui — serveur/CLI uniquement |
+| `ENCRYPTION_KEY` | Chiffrement applicatif de toute colonne `credentials_encrypted` (`gateway_credentials`, `integrations`, et toute table future du même type — voir « Base de données (Supabase) ») via `libsodium-wrappers`, `lib/crypto/encrypt.ts` | Oui — variable d'environnement serveur uniquement, jamais en base, jamais commitée, jamais dans un fichier `.env*` versionné |
 
 **`.env.sentry-build-plugin` ne doit pas être commité.** Il contient le token d'auth Sentry. S'assurer qu'il est dans `.gitignore`.
 
-Quand les autres services seront ajoutés, toutes les clés secrètes (Supabase service role, Inngest signing key, clés API passerelles) sont serveur uniquement (`process.env.*` sans préfixe `NEXT_PUBLIC_`). Les clés des passerelles de paiement des vendeurs sont chiffrées au repos en base.
+**`.env.example`** existe (racine du repo) comme gabarit des variables ci-dessus, sans valeurs réelles — c'est le seul fichier `.env*` commité (exception explicite dans `.gitignore`, `!.env.example`). `.env.local` contient les vraies valeurs, n'est jamais commité.
+
+Quand les autres services seront ajoutés, toutes les clés secrètes (Inngest signing key, clés API passerelles) sont serveur uniquement (`process.env.*` sans préfixe `NEXT_PUBLIC_`). Les clés des passerelles de paiement des vendeurs sont chiffrées au repos en base.
+
+### Gouvernance de `ENCRYPTION_KEY`
+
+**Accès en production (V1) :** le propriétaire du projet uniquement, via les variables d'environnement Vercel. Pas d'accès partagé, pas de gestionnaire de secrets dédié — il n'y a pas d'équipe à ce stade. **Cette réponse est spécifique à la V1 et devra être revue dès qu'un premier collaborateur technique rejoint le projet** (accès partagé = nécessité d'un vrai contrôle d'accès et probablement d'un gestionnaire de secrets, pas juste les env vars Vercel du propriétaire).
+
+**Procédure de régénération**, si la clé doit un jour être changée (compromission suspectée, rotation de sécurité planifiée, départ de quelqu'un qui y avait accès) :
+
+1. Générer une nouvelle clé (`ENCRYPTION_KEY_NEW`), la déployer **en plus de** l'ancienne — ne jamais retirer l'ancienne avant d'avoir migré toutes les lignes existantes, sous peine de rendre tout `credentials_encrypted` existant indéchiffrable.
+2. Déployer une version de `lib/crypto/encrypt.ts` capable de déchiffrer avec l'ancienne clé et de chiffrer avec la nouvelle (double clé temporaire, ex. `ENCRYPTION_KEY` + `ENCRYPTION_KEY_PREVIOUS`).
+3. Exécuter un script ponctuel : pour chaque ligne de **chaque table portant `credentials_encrypted`** (`gateway_credentials`, `integrations`, et toute table future du même type), déchiffrer avec l'ancienne clé, rechiffrer avec la nouvelle, écrire la ligne.
+4. Une fois toutes les lignes migrées (vérifier qu'aucune ligne ne déchiffre plus qu'avec l'ancienne clé), retirer l'ancienne clé de la configuration et du code.
+5. Documenter la date de rotation et la raison (même sommairement) — pas de table d'audit dédiée pour l'instant, une note suffit tant que ça reste rare.
+
+Cette procédure est une proposition technique, pas encore exécutée ni testée — à valider avant d'en avoir réellement besoin plutôt qu'en urgence.
 
 ---
 
@@ -252,7 +277,6 @@ Règles applicables à chaque contribution :
 ## Questions ouvertes
 
 - **Framework de test** : aucun runner configuré. Avant de travailler sur le noyau de paiement, choisir et installer (Vitest recommandé pour la compatibilité avec l'écosystème Next.js / Vite).
-- **`.env.example`** : aucun fichier `.env.example` n'existe. À créer quand les premières vraies variables seront définies.
 - **`tracesSampleRate: 1`** dans les configs Sentry : 100 % en production est coûteux — à ajuster avant le lancement.
 - **`sentry-example-page/`** : à supprimer avant le premier écran réel du produit.
 - **Import `withSentryConfig` déprécié** : `next.config.ts` importe depuis `@sentry/nextjs` — à migrer vers `@sentry/nextjs/config` avant la v11.

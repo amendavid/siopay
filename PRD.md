@@ -32,7 +32,6 @@ L'écrasante majorité des paiements se fait par Mobile Money (MTN MoMo, Moov Mo
 
 **Conséquences produit :**
 - Le checkout doit être pensé mobile d'abord, pas adapté au mobile après coup
-- Le numéro de téléphone est l'identifiant principal de l'acheteur, souvent plus fiable que l'email
 - Les échecs de paiement sont fréquents et ont des causes spécifiques (solde insuffisant, timeout opérateur, annulation) qui n'existent pas dans le monde de la carte bancaire
 
 ### Les contraintes techniques du terrain
@@ -97,7 +96,7 @@ Concrètement : le vendeur crée son compte chez l'agrégateur de son choix, fai
 - L'argent arrive directement sur le compte du vendeur, jamais sur un compte SioPay
 - SioPay ne peut techniquement pas prélever de commission — les clés API des agrégateurs sont généralement restreintes à l'encaissement, sans droit de débit
 - Le vendeur garde la relation contractuelle avec son agrégateur, ses conditions tarifaires, ses délais de retrait
-- **Les retraits ne concernent pas SioPay.** Ils se passent entre le vendeur et son agrégateur, sur l'interface de ce dernier. SioPay n'a ni la visibilité technique (beaucoup d'agrégateurs n'exposent aucun statut au-delà du paiement reçu) ni l'intérêt de les afficher : montrer un statut de retrait laisserait croire que l'argent transite par SioPay, ce qui contredirait frontalement la promesse du produit
+- Les retraits se passent entre le vendeur et son agrégateur, sur l'interface de ce dernier. SioPay n'a ni la visibilité technique (beaucoup d'agrégateurs n'exposent aucun statut au-delà du paiement reçu) ni l'intérêt de les afficher : montrer un statut de retrait laisserait croire que l'argent transite par SioPay, ce qui contredirait frontalement la promesse du produit
 
 ### L'invariant : SioPay ne détient jamais l'argent
 
@@ -129,6 +128,14 @@ Le paiement est la partie du produit où une erreur coûte de l'argent réel à 
 - **Aucune corruption silencieuse** — un montant mal typé, une devise inattendue, un champ manquant doivent être détectés et loggés, jamais absorbés discrètement
 - **Observabilité** — quand quelque chose casse, on doit pouvoir dire quoi, quand et pour quelle transaction, sans reconstituer à la main
 
+### Causes d'échec normalisées
+
+Quand un paiement Mobile Money échoue, l'agrégateur remonte un code d'erreur brut. Ces codes diffèrent d'un agrégateur à l'autre et sont rarement documentés correctement.
+
+**SioPay normalise ces codes vers un vocabulaire unique et lisible** : solde insuffisant, timeout opérateur, annulation par l'utilisateur, numéro invalide, et un fourre-tout pour l'inconnu.
+
+C'est une des briques les plus différenciantes du produit. Savoir *pourquoi* un paiement a échoué permet une relance ciblée — « recharge ton compte et réessaie » plutôt qu'un générique « ton paiement a échoué ». Cette information doit être disponible partout où elle est utile : interface, webhook sortant, déclencheurs d'automatisation.
+
 ### Devises
 
 Le modèle de devises est structurant et doit être posé dès le départ, sous peine de fermer les marchés qui n'utilisent pas la même monnaie que le marché de départ.
@@ -141,7 +148,7 @@ C'est le **référentiel de valeur** du compte. Le vendeur fixe ses prix dedans,
 
 L'imposer plutôt que la demander supprime une question que le vendeur n'a aucune raison de se poser : un vendeur ouest-africain pense en FCFA, comme tout le monde autour de lui. Lui offrir un choix, c'est créer un doute et une possibilité de se tromper. C'est aussi ce qui rend la couverture géographique explicite — supporter un nouveau pays est une décision consciente, avec sa devise et une passerelle capable de l'encaisser.
 
-**2. La devise d'affichage vendeur** — modifiable à tout moment.
+**2. La devise d'affichage** — modifiable à tout moment.
 
 Le vendeur peut vouloir raisonner en dollars ou en euros dans son dashboard. Quand cette devise diffère de la devise de zone, le montant en devise de zone est **systématiquement affiché à côté** : à la saisie d'un prix, dans les listes de ventes, dans les statistiques.
 
@@ -177,17 +184,29 @@ Dans la grande majorité des cas, devise de zone et devise de passerelle sont id
 - **Aucun montant n'existe sans sa devise.** Jamais un nombre nu — toujours un couple montant + devise, partout : base de données, API, webhooks, interface.
 - **Pays, devises, opérateurs de paiement et taux de change sont des données de configuration**, jamais des constantes dans le code. Ajouter un pays ou une devise ne doit demander aucune modification de la logique métier.
 
-### Causes d'échec normalisées
-
-Quand un paiement Mobile Money échoue, l'agrégateur remonte un code d'erreur brut. Ces codes diffèrent d'un agrégateur à l'autre et sont rarement documentés correctement.
-
-**SioPay normalise ces codes vers un vocabulaire unique et lisible** : solde insuffisant, timeout opérateur, annulation par l'utilisateur, numéro invalide, et un fourre-tout pour l'inconnu.
-
-C'est une des briques les plus différenciantes du produit. Savoir *pourquoi* un paiement a échoué permet une relance ciblée — « recharge ton compte et réessaie » plutôt qu'un générique « ton paiement a échoué ». Cette information doit être disponible partout où elle est utile : interface, webhook sortant, déclencheurs d'automatisation.
-
 ---
 
 ## 5. Structure du produit
+
+### Compte et espace de vente
+
+**Un compte** est l'identité de connexion du vendeur — l'utilisateur qui s'authentifie sur SioPay.
+
+**Un espace** est une boutique : c'est là que vivent les offres, les clients, les liens de paiement et tout le reste de l'activité commerciale. Un compte peut posséder plusieurs espaces à terme — un vendeur avec deux marques distinctes gère chacune comme un espace séparé, avec son propre catalogue et ses propres clients.
+
+L'abonnement se souscrit au niveau du **compte**, pas de l'espace : le palier et les crédits d'automatisation sont partagés entre tous les espaces d'un même vendeur. En revanche, **toute donnée métier se rattache à un espace**, jamais directement au compte — y compris l'identité client (voir section 8).
+
+⚠️ Même si un vendeur ne possède qu'un seul espace en V1, cette séparation doit exister dès le départ dans le modèle de données. Rattacher les données métier directement au compte, puis les migrer vers des espaces séparés une fois que plusieurs vendeurs ont des données réelles, serait une opération lourde et risquée sur un système qui manipule des paiements.
+
+### Adressage public
+
+Chaque espace possède un identifiant unique qui devient son sous-domaine public (`monespace.siopay.io`). C'est cet identifiant qui isole naturellement les vendeurs les uns des autres sur le plan des adresses publiques — deux vendeurs distincts peuvent réutiliser librement les mêmes noms pour leurs liens ou leurs pages sans jamais entrer en collision, puisqu'ils vivent sous des sous-domaines différents.
+
+**Le lien de paiement et la page de vente vivent sur des chemins publics distincts, avec des identifiants indépendants.** Un lien de paiement a sa propre adresse (le checkout), une page de vente a la sienne (la vitrine) — même quand l'une mène à l'autre. Les deux identifiants sont uniques à l'intérieur d'un même espace, jamais vérifiés l'un contre l'autre : un lien et sa page peuvent porter le même nom sans que ce soit un problème, puisqu'ils n'occupent pas le même espace de noms.
+
+Ces identifiants sont générés automatiquement à partir de ce que le vendeur saisit (le titre de l'offre, le nom de la page), et restent modifiables après coup — y compris celui de l'espace lui-même.
+
+Une liste de noms réservés protège les routes internes de SioPay et les marques connues : aucun vendeur ne peut nommer son espace, son lien ou sa page avec l'un de ces termes.
 
 ### Offre
 
@@ -207,7 +226,7 @@ C'est aussi l'unité de tracking : chaque lien a ses propres statistiques de con
 
 ### Page de vente
 
-Optionnelle. La vitrine publique d'un lien de paiement.
+Optionnelle. La vitrine publique d'un lien de paiement, avec sa propre adresse (voir « Adressage public » ci-dessus).
 
 **Ce sont des modèles paramétrés, pas un éditeur visuel.** Le vendeur choisit un design, remplit des champs de texte, choisit sa couleur de marque, active ou désactive des sections. Il ne réorganise pas la mise en page, n'écrit pas de CSS et n'upload pas de structure.
 
@@ -237,6 +256,8 @@ Le vendeur configure son livrable au moment où il crée son offre. Le système 
 - La livraison ne se facture jamais, sur aucun plan
 - Elle n'apparaît pas dans le moteur d'automatisations et n'y est pas modifiable
 - Si le vendeur veut faire *autre chose* à l'achat (email de bienvenue personnalisé, ajout d'un tag, proposition d'un autre produit), il crée un workflow séparé. Les deux mécanismes coexistent sans se mélanger.
+
+**La livraison sanctionne l'achat dans son ensemble, pas une tentative de paiement précise.** Un acheteur peut échouer plusieurs fois avant de réussir — c'est le succès final qui déclenche la livraison, et un seul cycle de livraison existe par parcours d'achat, quel que soit le nombre de tentatives qui ont précédé.
 
 ### Types de livrables
 
@@ -281,6 +302,14 @@ Trois axes doivent pouvoir évoluer séparément :
 
 ⚠️ Cette modularité n'est pas de la sur-ingénierie. Le marché évolue vite : un nouvel outil de communication peut émerger, un vendeur peut vouloir brancher son propre CRM, une plateforme de contenu peut devenir incontournable. Si l'agent comprend le fonctionnement général du système, il doit pouvoir intégrer un nouvel outil sans régression sur l'existant.
 
+### Outils connectés — un principe transversal
+
+**Un outil externe connecté une fois par le vendeur reste disponible pour tous les usages qui en ont besoin, sans jamais être reconnecté.**
+
+Un vendeur qui connecte son compte Systeme.io pour automatiser la livraison d'une formation doit pouvoir réutiliser cette même connexion plus tard pour une action d'automatisation (par exemple, ajouter un tag à un client relancé plusieurs fois sans achat) — sans que le produit ne lui redemande une information qu'il a déjà donnée.
+
+Ce principe s'applique à tout outil tiers connecté par le vendeur (plateformes de livraison, futurs outils d'automatisation), à l'exception des passerelles de paiement qui suivent leurs propres règles (voir section 4) : le paiement se route automatiquement vers une passerelle par défaut, tandis qu'un outil connecté se choisit explicitement à chaque usage — un vendeur peut d'ailleurs connecter plusieurs comptes du même outil (deux comptes Systeme.io pour deux activités distinctes, par exemple), chacun nommé pour rester identifiable.
+
 ### Playbooks : deux interfaces, un moteur
 
 Un vendeur débutant ne saura jamais composer une règle du type « a acheté le produit A il y a plus de X jours ET n'a pas acheté le produit B ». La solution n'est pas de lui faire générer la règle par IA — c'est de **ne jamais lui montrer la règle**.
@@ -290,6 +319,18 @@ Un vendeur débutant ne saura jamais composer une règle du type « a acheté le
 **Composition libre** : pour les vendeurs avancés qui veulent construire leurs propres règles.
 
 Les deux s'appuient sur le même moteur. Ce sont deux interfaces sur une seule mécanique.
+
+### Codes promotionnels
+
+Un levier marketing volontairement flexible, pensé pour ne jamais contraindre les choix commerciaux du vendeur.
+
+**Portée** — un code peut s'appliquer à un lien de paiement précis, à une offre entière, ou à l'espace tout entier. Le vendeur choisit le niveau qui correspond à son intention.
+
+**Usage** — deux dimensions indépendantes : à qui le code s'adresse (n'importe quel acheteur, ou un client précis) et combien de fois il peut être utilisé (une fois, un nombre limité, illimité). Un code peut ainsi être à la fois réservé à un client et à usage unique — exactement le cas d'une relance individuelle après plusieurs échecs.
+
+**Réduction** — un montant fixe ou un pourcentage, au choix du vendeur.
+
+**Origine** — un code peut être créé manuellement par le vendeur, ou généré automatiquement par une automatisation (typiquement, un code unique proposé à un client après plusieurs relances infructueuses). Cette distinction permet de rattacher la conversion générée par un code automatique à l'automatisation qui l'a produit, dans le cadre de l'attribution du revenu.
 
 ### Attribution du revenu
 
@@ -313,32 +354,65 @@ La plupart des outils du marché organisent leurs données par fonctionnalité :
 
 **Contrainte concrète :** l'identité client doit être résolue le plus tôt possible dans le parcours, et les tentatives multiples d'un même acheteur doivent être regroupées sous une seule identité. Un acheteur qui échoue cinq fois puis réussit est un client avec six événements, pas six lignes indépendantes.
 
+**L'email normalisé est la seule clé de résolution d'identité**, jamais le téléphone. Le téléphone est collecté (utile au paiement et au contact) mais ne sert jamais de signal de rapprochement entre deux fiches client, y compris en cas de correspondance parfaite : deux `customer_id` peuvent légitimement partager un même numéro sans qu'aucune fusion, automatique ou manuelle, ne se déclenche sur cette seule base. Toute fusion de deux identités reste une action manuelle validée, jamais un processus silencieux.
+
+L'email est collecté obligatoirement dès la première tentative de paiement, sans exception possible côté vendeur — c'est aussi la convention du marché (Systeme.io, Chariow...), qu'il ne faut pas rompre.
+
+**L'identité client est résolue par espace, pas par compte.** Un même acheteur qui achète sur deux espaces différents d'un même vendeur (deux marques distinctes) a deux `customer_id` séparés, sans lien entre eux. C'est cohérent avec le fait qu'un espace est une identité commerciale à part entière aux yeux de l'acheteur, qui n'a généralement pas conscience d'acheter chez le même vendeur.
+
+Ce choix n'interdit pas une vue client unifiée à travers plusieurs espaces plus tard — elle resterait simple à ajouter en remontant du client à l'espace, puis de l'espace au compte propriétaire, sans modifier la structure existante. Mais elle n'est pas construite tant que le besoin n'est pas confirmé.
+
 ⚠️ Si les événements ne portent pas une identité client résolue, la timeline ne pourra jamais être reconstruite après coup. C'est le type de décision qui coûte plusieurs fois plus cher à rétrofitter qu'à poser d'emblée.
+
+### Le parcours d'achat : distinguer la session de la tentative
+
+Un acheteur peut échouer plusieurs fois avant de réussir — solde insuffisant, timeout, erreur réseau — parfois en quelques minutes. **Le système doit reconnaître que ces tentatives successives appartiennent au même parcours d'achat**, pas les traiter comme des événements isolés sans lien entre eux.
+
+C'est une distinction structurante : **la session** représente le parcours entier, de l'arrivée sur le lien de paiement jusqu'au succès, à l'abandon, ou à l'expiration. **La tentative** est un essai précis contre une passerelle, avec son propre résultat.
+
+**Conséquences concrètes :**
+- L'identité de l'acheteur et le produit concerné se rattachent à la session, pas à chaque tentative — ils ne changent pas entre deux essais du même parcours
+- Le statut de livraison est un résultat du parcours entier, pas d'une tentative précise
+- Une session a une durée de vie suffisamment généreuse pour ne pas confondre un acheteur en train de réessayer avec un abandon définitif
+- Un paiement qui réussit finalement, même après un délai, doit toujours pouvoir clore correctement le parcours — y compris si la confirmation de la passerelle arrive en retard, après que la session ait semblé expirer
+
+⚠️ Cette distinction corrige un défaut observé chez la concurrence : des parcours de paiement à la durée de vie trop courte, où plusieurs échecs successifs du même acheteur apparaissent comme des événements disjoints, sans qu'aucune vue ne permette de comprendre ce qui s'est réellement passé entre la première tentative et la conversion finale — ni de proposer une relance vraiment ciblée sur la base de cet historique.
+
+### Granularité des passerelles
+
+Savoir qu'un paiement a transité par un agrégateur ne suffit pas à comprendre une panne. Trois niveaux distincts doivent être distingués : l'agrégateur utilisé, la méthode de paiement précise proposée à l'acheteur, et l'opérateur Mobile Money sous-jacent — indépendant du pays.
+
+Cette dernière distinction a une vraie valeur d'exploitation : elle permet de savoir si une dégradation vient d'un opérateur en particulier (une panne MTN qui toucherait plusieurs pays à la fois) plutôt que d'un problème localisé chez une seule passerelle dans un seul pays.
 
 ### Instrumentation
 
-**Tous les événements significatifs du parcours doivent être capturés dès le premier jour**, même si leur exploitation vient plus tard : visites de page, démarrage de checkout, progression par étape, tentatives de paiement, succès, échecs avec cause, coûts de relance engagés par client.
+**Tous les événements à valeur individuelle du parcours d'achat doivent être capturés dès le premier jour**, même si leur exploitation vient plus tard : démarrage de checkout, progression par étape, tentatives de paiement, succès, échecs avec cause, coûts de relance engagés par client.
 
 ⚠️ Instrumenter coûte peu maintenant. Rétrofitter sur des données historiques manquantes est impossible. Toute l'analytique, les déclencheurs comportementaux et l'attribution reposent sur cette base.
+
+**Le simple trafic de visite (impressions, visites uniques) ne relève pas de cette instrumentation fine.** Une visite de page n'a pas de valeur individuelle à être conservée en détail — ce qui compte, c'est le volume agrégé, pas chaque occurrence. Ce trafic doit être compté, pas journalisé événement par événement : sur un produit dont l'audience peut être poussée par des campagnes publicitaires générant des milliers de visites en quelques heures, journaliser chaque visite individuellement ferait exploser le volume de données sans apporter de valeur proportionnelle.
+
+**La distinction entre impressions et visites uniques a un coût réel à anticiper.** Une impression est simple à compter — chaque chargement de page. Une visite unique suppose de reconnaître qu'un même visiteur qui revient plusieurs fois dans la même journée ne doit compter qu'une fois, ce qui nécessite un identifiant anonyme stable côté visiteur (avant même qu'une identité ne soit connue), vérifié avant chaque comptage.
 
 ### Ce que le vendeur doit pouvoir voir
 
 **Sur un client** : son parcours complet en une vue chronologique — quand il est arrivé, combien de fois il a tenté de payer, pourquoi ça a échoué, quelles relances il a reçues, ce qu'il a coûté, ce qu'il a rapporté.
 
-**Sur son activité** : revenu total, entonnoir de conversion (visites → checkouts démarrés → paiements tentés → réussis), taux d'abandon par étape, **répartition des causes d'échec**, performance par offre et par lien de paiement.
+**Sur son activité** : revenu total, entonnoir de conversion (visites → checkouts démarrés → paiements tentés → réussis), taux d'abandon par étape, **répartition des causes d'échec**, performance par offre et par lien de paiement, et le volume de trafic (impressions et visites uniques) par offre, lien et page de vente, avec une ventilation par pays, appareil et système d'exploitation.
 
 ---
 
 ## 9. Sécurité et données sensibles
 
-SioPay manipule les clés API de passerelle de ses vendeurs — c'est-à-dire les moyens d'encaisser en leur nom.
+SioPay manipule les clés API de passerelle de ses vendeurs, ainsi que les identifiants de connexion aux outils tiers qu'ils utilisent — c'est-à-dire les moyens d'agir en leur nom.
 
 **Exigences :**
-- Chiffrement au repos de tous les secrets : clés API des passerelles, tokens d'accès aux outils tiers connectés
+- Chiffrement au repos de tous les secrets : clés API des passerelles, identifiants des outils tiers connectés. Un secret dont la forme varie selon le fournisseur (une clé simple, un couple de clés, un jeton avec renouvellement) se traite comme un ensemble structuré chiffré comme un bloc unique, jamais comme des valeurs stockées séparément en clair
 - Isolation stricte des données entre comptes vendeurs — un vendeur ne doit jamais pouvoir accéder aux données d'un autre, y compris par erreur de requête
 - Aucune donnée sensible en clair dans les logs, jamais
 - Vérification de signature sur tous les webhooks entrants
 - Protection des endpoints publics contre l'abus
+- Aucun secret chiffré n'est jamais exposé, même partiellement, à travers une interface accessible au vendeur lui-même — le déchiffrement n'a lieu que côté serveur, au moment précis où le secret doit être utilisé
 
 ---
 

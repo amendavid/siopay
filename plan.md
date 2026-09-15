@@ -40,27 +40,43 @@
 
 **Ordre de réalisation :**
 
-1. **Outillage Supabase** — installer `@supabase/supabase-js` et `supabase` CLI ; initialiser la config locale (`supabase init`) ; ajouter `SUPABASE_URL`, `SUPABASE_ANON_KEY`, `SUPABASE_SERVICE_ROLE_KEY` dans `.env.local` et sur Vercel.
+1. **Outillage Supabase** — installer `@supabase/supabase-js` et `supabase` CLI ; config locale liée au projet distant (`supabase link`) ; ajouter `NEXT_PUBLIC_SUPABASE_URL`, `NEXT_PUBLIC_SUPABASE_ANON_KEY`, `SUPABASE_SERVICE_ROLE_KEY` dans `.env.local` et sur Vercel — préfixe `NEXT_PUBLIC_` nécessaire sur les deux premières, sinon `createBrowserClient()` ne peut pas les lire côté navigateur (corrigé, `AGENTS.md`).
 
 2. **Client Supabase** — `lib/db/client.ts` : deux exports — `createServerClient()` (service role, serveur uniquement) et `createBrowserClient()` (anon key). Ne jamais exposer la service role key côté client.
 
-3. **Migrations (ordre imposé par les dépendances FK) :**
-   - `0001_accounts.sql` — table `accounts` (id, user_id → auth.users, currency_zone, display_currency, created_at, updated_at)
-   - `0002_customers.sql` — table `customers` (id, account_id, phone, email, fingerprint pour résolution d'identité, created_at)
-   - `0003_plans.sql` — table `plans` (id, name, credit_allowance, price_monthly — valeurs injectées en S15)
-   - `0004_offers.sql` — table `offers` (id, account_id, title, delivery_config jsonb, created_at)
-   - `0005_payment_links.sql` — table `payment_links` (id, offer_id, title, description, amount, currency, slug unique, created_at)
-   - `0006_sales_pages.sql` — table `sales_pages` (id, payment_link_id, template_id, content jsonb, brand_color, active_sections jsonb, created_at) — `payment_link_id` nullable pour permettre une page sans lien direct
-   - `0007_transactions.sql` — table `transactions` (id, account_id, customer_id, payment_link_id, external_id unique, amount, currency, payment_status, delivery_status, failure_reason, is_test, gateway, created_at, updated_at)
-   - `0008_events.sql` — table `events` (id, account_id, customer_id, transaction_id nullable, type, payload jsonb, created_at)
-   - `0009_deliveries.sql` — table `deliveries` (id, transaction_id, provider, status, attempts, last_error, delivered_at, created_at)
-   - `0010_gateway_credentials.sql` — table `gateway_credentials` (id, account_id, gateway, credentials_encrypted bytea, currency, is_default, created_at)
+3. **Migrations (ordre imposé par les dépendances FK — renuméroté intégralement lors de la relecture d'ensemble, `docs/schema-design-notes.md` Section E ; remplace toute numérotation antérieure de ce document, y compris le fichier déjà écrit `supabase/migrations/0002_customers.sql` qui doit être réécrit sous le nouveau numéro) :**
+   - `0001_currencies.sql` — table `currencies` (code text primary key, name, created_at, updated_at). Définit aussi la fonction générique `set_updated_at()`, réutilisée telle quelle par toutes les migrations suivantes.
+   - `0002_reserved_slugs.sql` — table `reserved_slugs` (id, value unique, created_at, updated_at) + fonction `reject_reserved_slug()`.
+   - `0003_gateways.sql` — table `gateways` (code text primary key, name, logo_url, is_active, created_at, updated_at)
+   - `0004_processors.sql` — table `processors` (code text primary key, name, created_at, updated_at)
+   - `0005_countries.sql` — table `countries` (code text primary key, name, currency_code → `currencies`, created_at, updated_at)
+   - `0006_accounts.sql` — table `accounts` (id, user_id → auth.users, currency_zone → `currencies`, display_currency → `currencies`, created_at, updated_at) + fonction `private.user_owns_account(account_id)`.
+   - `0007_payment_methods.sql` — table `payment_methods` (id, name unique, processor_code → `processors`, country_code → `countries`, is_active, created_at, updated_at)
+   - `0008_plans.sql` — table `plans` (id, name unique, credit_allowance, price_monthly, price_monthly_currency → `currencies`, created_at, updated_at — valeurs injectées en S15/S18)
+   - `0009_account_plans.sql` — table `account_plans` (id, account_id → `accounts`, plan_id → `plans`, started_at, ended_at nullable, created_at, updated_at)
+   - `0010_spaces.sql` — table `spaces` (id, account_id → `accounts`, name, slug unique, created_at, updated_at) + fonction `private.user_owns_space(space_id)`. Devient le sous-domaine public (`{slug}.siopay.io`).
+   - `0011_gateway_credentials.sql` — table `gateway_credentials` (id, space_id → `spaces`, gateway → `gateways`, credentials_encrypted bytea, currency → `currencies`, is_default, status, status_updated_at, created_at, updated_at)
+   - `0012_integrations.sql` — table `integrations` (id, space_id → `spaces`, provider, label, credentials_encrypted bytea, status, status_updated_at, created_at, updated_at) — comptes tiers connectés, générique (livraison + futures automatisations)
+   - `0013_customers.sql` — table `customers` (id, space_id → `spaces`, email — normalisé lowercase+trim, clé de résolution d'identité, unique par `space_id` —, phone collecté mais non identifiant, created_at, updated_at)
+   - `0014_offers.sql` — table `offers` (id, space_id → `spaces`, title, delivery_config jsonb, base_price_amount, base_price_currency → `currencies`, payment_mode, compare_at_price_amount, promo_price_amount, promo_active, suggested_price_amount, thumbnail_url, created_at, updated_at)
+   - `0015_payment_links.sql` — table `payment_links` (id, offer_id → `offers`, space_id → `spaces` [dérivé par trigger], title, description, base_price_amount nullable, payment_mode nullable, slug unique par espace, created_at, updated_at)
+   - `0016_sales_pages.sql` — table `sales_pages` (id, payment_link_id → `payment_links` unique, space_id → `spaces` [dérivé], title, slug unique par espace, template_id, content jsonb, brand_color, active_sections jsonb, created_at, updated_at) — `payment_link_id` not null : une page de vente est toujours rattachée à un lien de paiement (PRD §5), c'est la relation inverse (un lien sans page) qui est optionnelle
+   - `0017_checkout_sessions.sql` — table `checkout_sessions` (id, space_id → `spaces` [dérivé], customer_id → `customers`, payment_link_id → `payment_links`, status, expires_at, closed_at, delivery_status, is_test, metadata jsonb, created_at, updated_at) — représente le parcours d'achat entier, pas une tentative isolée
+   - `0018_transactions.sql` — table `transactions` (id, session_id → `checkout_sessions`, space_id → `spaces` [dérivé], external_id, gateway_credential_id nullable → `gateway_credentials`, payment_method_id nullable → `payment_methods`, processor_code nullable → `processors`, amount, currency → `currencies`, payment_status, failure_reason, created_at, updated_at) — une tentative individuelle à l'intérieur d'une session
+   - `0019_deliveries.sql` — table `deliveries` (id, space_id → `spaces` [dérivé], session_id → `checkout_sessions` unique, provider, integration_id nullable → `integrations`, status, attempts, last_error, payload jsonb, delivered_at, created_at, updated_at)
+   - `0020_daily_visit_counts.sql` — table `daily_visit_counts` (id, space_id → `spaces` [dérivé], payment_link_id/offer_id/sales_page_id — un seul renseigné —, visit_date, dimension_type, dimension_value, impressions, unique_visits, created_at, updated_at) — compteurs, pas un événement par visite
+   - `0021_visit_dedup.sql` — table `visit_dedup` (id, space_id → `spaces` [dérivé], visitor_id, payment_link_id/offer_id/sales_page_id — un seul renseigné —, visit_date, created_at)
+   - `0022_events.sql` — table `events` (id, space_id → `spaces` [fourni par le serveur, pas dérivé], customer_id nullable → `customers`, session_id nullable → `checkout_sessions`, transaction_id nullable → `transactions`, type, payload jsonb, created_at) — **pas de `page_view`**, réservée aux moments à valeur individuelle de la timeline d'achat
+   - `0023_promo_codes.sql` — table `promo_codes` (id, space_id → `spaces`, code unique par espace, payment_link_id/offer_id — au plus un —, customer_id nullable, max_uses, uses_count, discount_type, discount_amount, discount_currency, discount_percentage, source, is_active, expires_at, created_at, updated_at)
+   - `0024_promo_code_uses.sql` — table `promo_code_uses` (id, promo_code_id → `promo_codes`, session_id → `checkout_sessions` unique, space_id → `spaces` [dérivé], customer_id → `customers` [dérivé], discount_applied_amount, discount_applied_currency, created_at)
 
-4. **Chiffrement des credentials** — chiffrement au niveau applicatif avec `libsodium-wrappers` : la clé de chiffrement est une variable d'environnement serveur (`ENCRYPTION_KEY`). Les credentials ne sont jamais stockés en clair. Helpers dans `lib/crypto/encrypt.ts`.
+   Détail complet de chaque table (colonnes, contraintes, triggers, RLS) dans `docs/schema-design-notes.md` — cette liste ne donne que l'ordre et les colonnes principales.
 
-5. **RLS** — pour chaque table métier : `USING (account_id = auth.uid())` (ou via join accounts). Tester avec deux comptes distincts.
+4. **Chiffrement des credentials** — chiffrement au niveau applicatif avec `libsodium-wrappers` : la clé de chiffrement est une variable d'environnement serveur (`ENCRYPTION_KEY`). Les credentials ne sont jamais stockés en clair. Helpers dans `lib/crypto/encrypt.ts`. S'applique à `gateway_credentials` **et** `integrations` (même mécanisme, principe généralisé dans `AGENTS.md`).
 
-6. **Types TypeScript** — générer avec `supabase gen types typescript --local > lib/db/types.ts`. À regénérer après chaque migration.
+5. **RLS** — `for select to authenticated using (...)` sur chaque table métier (jamais `for all`) : `private.user_owns_space(space_id)` pour les tables rattachées à un espace, `private.user_owns_account(account_id)` pour `spaces`/`account_plans`, comparaison directe sur `accounts`. Aucune écriture via RLS — toutes les écritures passent par le service role (Server Actions), ownership vérifié côté app avant l'appel (`AGENTS.md`, `docs/schema-design-notes.md` Section B). Tester avec deux comptes distincts.
+
+6. **Types TypeScript** — générer avec `supabase gen types typescript --linked > lib/db/types.ts` (projet distant, pas de Supabase local via Docker dans ce projet — corrigé). À regénérer après chaque migration.
 
 7. **Validation finale (feu vert S3)** — insérer manuellement une offre, un lien et une transaction liés via Supabase Studio avec le compte A, puis vérifier depuis le compte B (via le client anon avec session B) que la requête retourne 0 lignes.
 
@@ -74,16 +90,16 @@ lib/crypto/encrypt.ts          ← chiffrement/déchiffrement credentials
 ```
 
 **Critères de validation :**
-- [ ] Tables créées : accounts, offers, payment_links, sales_pages, transactions, customers, events, deliveries, plans, gateway_credentials
-- [ ] Identité client résolue : un même acheteur sur plusieurs tentatives = un seul `customer_id`
-- [ ] `transactions` porte `payment_status` ET `delivery_status` distincts
-- [ ] `events` prêt à recevoir : `page_view`, `checkout_started`, `checkout_step_completed`, `payment_attempted`, `payment_succeeded`, `payment_failed`
+- [ ] Les 24 tables créées, dans l'ordre : `currencies`, `reserved_slugs`, `gateways`, `processors`, `countries`, `accounts`, `payment_methods`, `plans`, `account_plans`, `spaces`, `gateway_credentials`, `integrations`, `customers`, `offers`, `payment_links`, `sales_pages`, `checkout_sessions`, `transactions`, `deliveries`, `daily_visit_counts`, `visit_dedup`, `events`, `promo_codes`, `promo_code_uses`
+- [ ] Identité client résolue par email normalisé (jamais par téléphone), **par espace** : un même acheteur sur plusieurs tentatives dans le même espace = un seul `customer_id` ; deux espaces distincts d'un même compte le traitent comme deux clients séparés (choix assumé, PRD §8)
+- [ ] `payment_status` (sur `transactions`, par tentative) et `delivery_status` (sur `checkout_sessions`, par parcours d'achat) restent distincts — **plus sur la même table** depuis la restructuration session/tentative (`docs/schema-design-notes.md`)
+- [ ] `events` prêt à recevoir : `checkout_started`, `checkout_step_completed`, `payment_attempted`, `payment_succeeded`, `payment_failed` — **pas `page_view`** : le trafic de page (impressions) vit dans `daily_visit_counts`/`visit_dedup`, pas dans `events`, pour ne jamais faire exploser son volume d'écriture avec une campagne sponsorisée (`docs/schema-design-notes.md`)
 - [ ] Relation Offre → Lien de paiement → Page de vente (page optionnelle)
 - [ ] Devise de zone au niveau du compte, devise déclarée par passerelle
 - [ ] Aucun montant stocké sans sa devise
-- [ ] RLS activée sur toutes les tables métier
-- [ ] RLS testée : compte A ne peut jamais lire les données du compte B
-- [ ] Credentials passerelles chiffrés en base, jamais en clair
+- [ ] RLS activée sur les 24 tables, sans exception — `for select` uniquement, aucune policy d'écriture (l'ownership en écriture se vérifie côté app avant l'appel au service role, `docs/schema-design-notes.md` Section B)
+- [ ] RLS testée : compte A ne peut jamais lire les données du compte B (un compte avec plusieurs espaces voit ses propres espaces, c'est attendu — l'isolation est par compte/utilisateur, pas par espace)
+- [ ] Credentials passerelles **et intégrations** chiffrés en base, jamais en clair (`gateway_credentials` et `integrations`, même mécanisme)
 - [ ] Types TypeScript générés depuis le schéma local
 - [ ] Migrations versionnées dans le repo
 
@@ -105,8 +121,8 @@ lib/crypto/encrypt.ts          ← chiffrement/déchiffrement credentials
    - Retourne une erreur typée si la transition est invalide — jamais d'exception silencieuse
 
 4. **Idempotence** — `lib/payments/idempotence.ts` :
-   - Contrainte `UNIQUE` sur `transactions.external_id`
-   - Fonction `upsertTransaction(payload)` : cherche d'abord par `external_id`, retourne l'existant si trouvé, crée sinon
+   - Contrainte `UNIQUE` sur `transactions (gateway_credential_id, external_id)` — révisé lors de la relecture d'ensemble (`docs/schema-design-notes.md`) : scopé par connexion pour éviter une collision entre deux agrégateurs différents, complété par un index partiel pour le cas `gateway_credential_id null` (offre gratuite)
+   - Fonction `upsertTransaction(payload)` : cherche d'abord par `(gateway_credential_id, external_id)`, retourne l'existant si trouvé, crée sinon
    - Le noyau de livraison et de stats n'est déclenché qu'à la première insertion, pas sur les doublons
 
 5. **Vérification de signature** — `lib/payments/webhook-verification.ts` :
@@ -118,7 +134,9 @@ lib/crypto/encrypt.ts          ← chiffrement/déchiffrement credentials
    - Vérifier que `currency` est une devise connue (depuis la config, jamais une constante inline)
    - Champ inattendu ou mal typé → loguer et rejeter, jamais absorber silencieusement
 
-7. **Route webhook** — `app/api/webhooks/[gateway]/route.ts` (placeholder) : orchestre vérification de signature → idempotence → machine à états → insertion en base. Le code du gateway est délégué à S4.
+7. **Route webhook** — `app/api/webhooks/[gateway]/route.ts` (placeholder) : orchestre vérification de signature → idempotence → machine à états → insertion en base → **émission des events `payment_succeeded`/`payment_failed`** (via `logEvent`, point 8) avec `transaction_id` systématiquement renseigné. Le code du gateway est délégué à S4.
+
+8. **Registre de types d'événements** — `lib/analytics/events.ts` : union TypeScript `EventType` (`checkout_started`, `checkout_step_completed`, `payment_attempted`, `payment_succeeded`, `payment_failed` pour l'instant — **pas `page_view`**, retiré de `events` lors de la relecture d'ensemble, le trafic de page vit dans `daily_visit_counts`/`visit_dedup` — liste appelée à grossir au fil du plan, jamais un `check` en base, voir `docs/schema-design-notes.md`). Fonction `logEvent(type: EventType, ...)` comme point d'entrée unique pour écrire dans `events` — premier type écrit en dur dans le code (`payment_succeeded`/`payment_failed`, point 7), donc le registre se construit ici plutôt que d'être différé : tout code ultérieur qui logue un événement (S7 checkout, S8 page de vente, S9 livraison, S13 webhooks sortants, S15 automatisations) passe par cette union, jamais une chaîne libre.
 
 **Modules concernés :**
 ```
@@ -127,6 +145,7 @@ lib/payments/state-machine.ts
 lib/payments/idempotence.ts
 lib/payments/webhook-verification.ts
 lib/payments/validation.ts
+lib/analytics/events.ts
 app/api/webhooks/[gateway]/route.ts
 vitest.config.ts
 .github/workflows/ci.yml
@@ -141,6 +160,8 @@ vitest.config.ts
 - [ ] Vérification de signature HMAC sur tous les webhooks entrants
 - [ ] Signature invalide → rejetée et loggée sans exposer le payload brut
 - [ ] Montant mal typé → détecté et logué, jamais silencieusement corrompu
+- [ ] `logEvent` typé (`EventType`) en place, réutilisable par les semaines suivantes
+- [ ] **Test automatisé dédié** : tout event `payment_succeeded` ou `payment_failed` créé par la route webhook porte un `transaction_id` non nul — cette table alimente directement la timeline client (PRD §13, différenciateur principal), un événement de paiement sans tentative associée casserait la reconstruction de la timeline silencieusement
 - [ ] Tests automatisés couvrant tous ces cas, passant en CI
 
 ---
@@ -306,7 +327,7 @@ lib/deliveries/file.ts
 
 1. **CRUD liens de paiement** — `app/(dashboard)/payment-links/` + `lib/actions/payment-links.ts`. Un lien hérite des données de son offre parente mais peut les surcharger.
 
-2. **Route checkout publique** — `app/c/[slug]/page.tsx`. Pas de middleware d'auth sur cette route.
+2. **Route checkout publique** — `app/c/[slug]/page.tsx`. Pas de middleware d'auth sur cette route. Comptabilise la visite dans `daily_visit_counts`/`visit_dedup` (`payment_link_id`) au chargement — même mécanisme que la page de vente (S8), pas un event.
 
 3. **Étapes du checkout (4 étapes) :**
    - Étape 1 — Résumé : titre, description, montant avec devise, mention paiement direct au vendeur
@@ -354,7 +375,7 @@ components/checkout/
 
 3. **Template #1** — `lib/sales-pages/templates/default.tsx` : structure complète (hero, description, CTA, sections toggleables). Seul template obligatoire en S8.
 
-4. **Route publique de la page de vente** — `app/p/[slug]/page.tsx` : récupère la page liée au slug, rend le template, log `page_view`.
+4. **Route publique de la page de vente** — `app/sales/[slug]/page.tsx`, résolue sous le sous-domaine de l'espace (`{space_slug}.siopay.io/sales/{slug}`) : récupère la page liée au slug **dans l'espace résolu depuis le sous-domaine**, rend le template, **incrémente `daily_visit_counts` + `visit_dedup`** (pas un `page_view` dans `events` — retiré, voir `docs/schema-design-notes.md`) : lit le `visitor_id` du cookie (le poser s'il est absent), upsert `visit_dedup(visitor_id, sales_page_id, aujourd'hui)`, incrémente `impressions` toujours et `unique_visits` seulement si la ligne `visit_dedup` vient d'être créée. Anciennement `app/p/[slug]/page.tsx` avec un slug unique globalement — corrigé pour refléter la décision prise sur `sales_pages.slug` (unique par espace, docs/schema-design-notes.md).
 
 5. **Éditeur dans le dashboard** — `app/(dashboard)/payment-links/[id]/page/page.tsx` : formulaire de saisie du contenu, color picker pour `brand_color`, toggles pour les sections. Server Action de sauvegarde.
 
@@ -365,7 +386,7 @@ components/checkout/
 lib/sales-pages/schema.ts
 lib/sales-pages/templates/index.ts
 lib/sales-pages/templates/default.tsx
-app/p/[slug]/page.tsx
+app/sales/[slug]/page.tsx
 app/(dashboard)/payment-links/[id]/page/page.tsx
 lib/actions/sales-pages.ts
 ```
@@ -377,7 +398,7 @@ lib/actions/sales-pages.ts
 - [ ] Couleur de marque configurable par vendeur
 - [ ] Sections activables en toggle : FAQ, témoignages, garantie
 - [ ] Ordre des sections fixe — pas de réorganisation
-- [ ] `page_view` loggé à chaque visite
+- [ ] Visite comptabilisée dans `daily_visit_counts` (impressions + unique) à chaque chargement de la page de vente, jamais dans `events`
 - [ ] Validation architecturale : ajouter un 2e design coûte moins d'un jour
 
 ---
@@ -398,7 +419,7 @@ lib/actions/sales-pages.ts
    }
    ```
 
-3. **Chiffrement credentials tiers** — table `platform_credentials` avec `credentials_encrypted`. Helpers réutilisés depuis `lib/crypto/encrypt.ts`.
+3. **Chiffrement credentials tiers** — table `integrations` (générique — comptes tiers connectés, pas propre à la livraison : réutilisée plus tard par le moteur d'automatisation pour ses propres actions, ex. ajouter un tag Systeme.io après des relances infructueuses) avec `credentials_encrypted`. Anciennement nommée `platform_credentials` dans cette version du plan — corrigé pour refléter sa portée élargie (`docs/schema-design-notes.md`). Helpers réutilisés depuis `lib/crypto/encrypt.ts`.
 
 4. **Deux intégrations** — `lib/deliveries/providers/systeme-io/index.ts` et `lib/deliveries/providers/skool/index.ts` : appel à l'API de chaque plateforme pour inscrire l'acheteur ou lui donner accès.
 
@@ -459,17 +480,21 @@ lib/crypto/encrypt.ts                          ← réutilisé
 
 3. **Vérification dashboard** — s'assurer que tous les jobs (livraison + webhooks) sont lisibles dans le dashboard Inngest : file d'attente, historique, échecs.
 
+4. **Nettoyage périodique `visit_dedup`** — `inngest/functions/visit-dedup-cleanup.ts` : fonction cron quotidienne qui supprime les lignes de plus de quelques jours. Cette table n'a d'utilité que pour répondre à "ce visiteur est-il déjà passé aujourd'hui" (`docs/schema-design-notes.md`) — contrairement à `events`/`transactions`, rien à conserver indéfiniment. Accumule depuis S8 sans purge (Inngest pas encore installé à ce moment) ; ce job résorbe le retard à son premier passage.
+
 **Modules concernés :**
 ```
-inngest/functions/webhook-retry.ts    ← nouveau
-inngest/functions/health-check.ts     ← nouveau
-app/api/inngest/route.ts              ← enrichi (nouvelles fonctions enregistrées)
+inngest/functions/webhook-retry.ts        ← nouveau
+inngest/functions/health-check.ts         ← nouveau
+inngest/functions/visit-dedup-cleanup.ts  ← nouveau
+app/api/inngest/route.ts                  ← enrichi (nouvelles fonctions enregistrées)
 ```
 
 **Critères de validation :**
 - [ ] Retry des webhooks entrants géré par Inngest (`webhook-retry.ts`)
 - [ ] Job différé testé avec délai d'1 minute (`health-check.ts`)
 - [ ] Dashboard Inngest lisible : jobs livraison + webhooks, file d'attente, échecs visibles
+- [ ] Purge quotidienne de `visit_dedup` active (`visit-dedup-cleanup.ts`), lignes de plus de quelques jours supprimées
 
 ---
 
@@ -479,9 +504,9 @@ app/api/inngest/route.ts              ← enrichi (nouvelles fonctions enregistr
 
 **Ordre de réalisation :**
 
-1. **Liste des clients** — `app/(dashboard)/customers/page.tsx` : table paginée, filtrée par `account_id` via RLS, triée par dernière activité.
+1. **Liste des clients** — `app/(dashboard)/customers/page.tsx` : table paginée, filtrée par `space_id` via RLS (corrigé — `customers` se rattache à l'espace, pas au compte, `docs/schema-design-notes.md`), triée par dernière activité.
 
-2. **Résolution multi-tentatives** — vérifier que les événements multiples d'un même acheteur sont bien regroupés. Si des `customer_id` dupliqués existent, ajouter une logique de merge dans `lib/analytics/customer.ts`.
+2. **Résolution multi-tentatives** — vérifier que les événements multiples d'un même acheteur (même email normalisé) sont bien regroupés sous un seul `customer_id`. Le téléphone n'est jamais un signal de matching ou de fusion, automatique ou manuel : une correspondance de téléphone entre deux `customer_id` d'emails différents ne doit jamais être proposée comme fusion possible.
 
 3. **Fiche client** — `app/(dashboard)/customers/[id]/page.tsx` :
    - En-tête : téléphone, email, stats agrégées
@@ -505,7 +530,7 @@ components/timeline/
 - [ ] Fiche client accessible depuis la liste
 - [ ] Timeline chronologique complète : visites, tentatives de paiement, échecs avec cause, achats, livraisons
 - [ ] Stats par client : total dépensé, nombre d'achats, panier moyen, premier/dernier achat
-- [ ] Tentatives multiples du même acheteur regroupées sous un seul `customer_id`
+- [ ] Tentatives multiples du même acheteur (même email normalisé) regroupées sous un seul `customer_id` — jamais par correspondance de téléphone
 - [ ] Rendu visuel soigné — c'est le différenciateur principal du produit
 
 ---
