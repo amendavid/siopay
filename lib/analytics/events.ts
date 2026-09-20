@@ -1,5 +1,6 @@
 import * as Sentry from '@sentry/nextjs'
 import { createServerClient } from '@/lib/db/client'
+import type { Json } from '@/lib/db/types'
 
 export type EventType =
   | 'checkout_started'
@@ -28,7 +29,7 @@ export type LogEventInput =
 export async function logEvent(input: LogEventInput): Promise<void> {
   const db = createServerClient()
 
-  const payload: Record<string, unknown> = { type: input.type }
+  const payload: Record<string, Json | undefined> = { type: input.type }
   if (input.type === 'checkout_step_completed') payload.step = input.step
   if (input.type === 'payment_failed' && input.failure_reason) {
     payload.failure_reason = input.failure_reason

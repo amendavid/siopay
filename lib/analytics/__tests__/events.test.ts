@@ -5,7 +5,7 @@ vi.mock('@sentry/nextjs', () => ({ captureException: vi.fn() }))
 
 // Stable spies — declared before the mock factory so the factory can close
 // over them; reset between tests via vi.clearAllMocks().
-const mockInsert = vi.fn(() => Promise.resolve({ error: null }))
+const mockInsert = vi.fn((_row: Record<string, unknown>) => Promise.resolve({ error: null }))
 const mockFrom = vi.fn(() => ({ insert: mockInsert }))
 
 vi.mock('@/lib/db/client', () => ({
