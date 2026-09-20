@@ -101,7 +101,7 @@ lib/crypto/encrypt.ts          ← chiffrement/déchiffrement credentials
 - [x] Aucun montant stocké sans sa devise
 - [x] RLS activée sur les 24 tables, sans exception — `for select` uniquement, aucune policy d'écriture (l'ownership en écriture se vérifie côté app avant l'appel au service role, `docs/schema-design-notes.md` Section B)
 - [x] RLS testée : compte A ne peut jamais lire les données du compte B (un compte avec plusieurs espaces voit ses propres espaces, c'est attendu — l'isolation est par compte/utilisateur, pas par espace)
-- [~] Credentials passerelles **et intégrations** chiffrés en base — **reporté à S9/S11** : les colonnes `credentials_encrypted bytea` existent, mais `lib/crypto/encrypt.ts` et `libsodium-wrappers` ne sont écrits qu'au moment où ces tables sont réellement utilisées. À cocher à ce moment-là, pas avant.
+- [~] Credentials passerelles **et intégrations** chiffrés en base — **déplacé vers S4** (voir critères S4) : incohérence trouvée le 20 sept entre cette note (qui reportait à S9/S11) et le point 2 de l'"Ordre de réalisation" S4, qui exige déjà une lecture chiffrée de `gateway_credentials` pour le premier paiement FedaPay. S4 est la première semaine où ce module est réellement nécessaire ; S9 ne fait que le réutiliser pour `integrations`.
 - [x] Types TypeScript générés depuis le schéma distant (`supabase gen types typescript --linked`)
 - [x] Migrations versionnées dans le repo
 
@@ -188,26 +188,29 @@ vitest.config.ts
    ```
    Le code métier n'importe jamais une implémentation directement — il reçoit l'interface.
 
-2. **Implémentation FedaPay** — `lib/payments/gateways/fedapay/index.ts` :
+2. **Chiffrement des credentials** — `lib/crypto/encrypt.ts` : chiffrement au niveau applicatif avec `libsodium-wrappers`, clé de chiffrement en variable d'environnement serveur (`ENCRYPTION_KEY`), jamais en base ni versionnée. Un secret dont la forme varie selon le fournisseur (clé API simple, couple public/privé...) se stocke comme un JSON structuré multi-clés, chiffré comme un bloc unique (`bytea`) — jamais des colonnes en clair par type de clé. Documenter l'algorithme réel utilisé par `libsodium-wrappers` (AES-256-GCM si configuré explicitement ainsi, sinon XSalsa20-Poly1305 par défaut) — ne pas supposer, vérifier et écrire ce qui est réellement implémenté. Ce module est réutilisé tel quel en S9 pour la table `integrations`, sans modification.
+
+3. **Implémentation FedaPay** — `lib/payments/gateways/fedapay/index.ts` :
    - Implémenter l'interface complète
    - Adapter les codes de statut et d'erreur vers le vocabulaire interne
    - Les credentials sont lus depuis les `gateway_credentials` chiffrées, jamais depuis les variables d'environnement directement
 
-3. **Registre des gateways** — `lib/payments/gateways/index.ts` : map `{ [name]: GatewayImpl }` pour que le webhook handler résolve la bonne implémentation depuis le paramètre d'URL `[gateway]`.
+4. **Registre des gateways** — `lib/payments/gateways/index.ts` : map `{ [name]: GatewayImpl }` pour que le webhook handler résolve la bonne implémentation depuis le paramètre d'URL `[gateway]`.
 
-4. **Widget inline** — intégration dans un placeholder de checkout (le checkout complet vient en S7). Pour l'instant, une page de test suffisante pour déclencher un vrai paiement.
+5. **Widget inline** — intégration dans un placeholder de checkout (le checkout complet vient en S7). Pour l'instant, une page de test suffisante pour déclencher un vrai paiement.
 
-5. **Flag `is_test`** — booléen sur `transactions`. Les transactions avec `is_test = true` sont exclues de toutes les stats et agrégations.
+6. **Flag `is_test`** — booléen sur `transactions`. Les transactions avec `is_test = true` sont exclues de toutes les stats et agrégations.
 
-6. **Test en argent réel** — déclencher un paiement de faible montant, vérifier l'enregistrement en base, provoquer un échec et vérifier la `failure_reason`.
+7. **Test en argent réel** — déclencher un paiement de faible montant, vérifier l'enregistrement en base, provoquer un échec et vérifier la `failure_reason`.
 
-7. **Vérification Sentry** — contrôler dans le dashboard Sentry qu'aucune donnée sensible n'est loggée.
+8. **Vérification Sentry** — contrôler dans le dashboard Sentry qu'aucune donnée sensible n'est loggée.
 
-8. **Rate limiting basique** — `lib/rate-limit.ts` : compteur en mémoire par IP, appliqué dans `middleware.ts` sur les routes `/api/webhooks/*` et `/c/[slug]`. Pas de dépendance externe — un `Map` avec TTL côté serveur suffit pour cette protection initiale. En S17, ce module sera remplacé par `@upstash/ratelimit` pour une protection généralisée et persistante.
+9. **Rate limiting basique** — `lib/rate-limit.ts` : compteur en mémoire par IP, appliqué dans `middleware.ts` sur les routes `/api/webhooks/*` et `/c/[slug]`. Pas de dépendance externe — un `Map` avec TTL côté serveur suffit pour cette protection initiale. En S17, ce module sera remplacé par `@upstash/ratelimit` pour une protection généralisée et persistante.
 
 **Modules concernés :**
 ```
 lib/payments/gateway.ts                    ← interface
+lib/crypto/encrypt.ts                      ← chiffrement/déchiffrement credentials (nouveau, déplacé depuis S2)
 lib/payments/gateways/fedapay/index.ts     ← implémentation FedaPay
 lib/payments/gateways/index.ts             ← registre
 app/api/webhooks/[gateway]/route.ts        ← complété avec FedaPay
@@ -220,6 +223,7 @@ middleware.ts                              ← enrichi avec rate limiting
 - [ ] Interface `PaymentGateway` abstraite, conçue pour N fournisseurs
 - [ ] FedaPay implémentant cette interface
 - [ ] Widget inline intégré + webhook en filet de sécurité
+- [ ] `lib/crypto/encrypt.ts` écrit et testé, algorithme réel documenté ; `gateway_credentials.credentials_encrypted` lue exclusivement via ce module, jamais depuis une variable d'environnement en dur
 - [ ] Un vrai paiement de petit montant effectué et enregistré correctement en base
 - [ ] Flag `is_test` fonctionnel, transactions de test exclues des stats
 - [ ] Un échec réel provoqué et correctement enregistré avec sa `failure_reason`
