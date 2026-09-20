@@ -26,6 +26,14 @@ describe('transitionTransaction — valid transitions', () => {
   it('expired → late_webhook_failed → failed', () => {
     expect(transitionTransaction(TransactionStatus.expired, 'late_webhook_failed')).toBe(TransactionStatus.failed)
   })
+
+  it('pending → payment_succeeded (skipping processing) → succeeded', () => {
+    expect(transitionTransaction(TransactionStatus.pending, 'payment_succeeded')).toBe(TransactionStatus.succeeded)
+  })
+
+  it('pending → payment_failed (skipping processing) → failed', () => {
+    expect(transitionTransaction(TransactionStatus.pending, 'payment_failed')).toBe(TransactionStatus.failed)
+  })
 })
 
 describe('transitionTransaction — invalid transitions', () => {
@@ -41,9 +49,5 @@ describe('transitionTransaction — invalid transitions', () => {
 
   it('expired → payment_succeeded (not via late webhook) → Error', () => {
     expect(transitionTransaction(TransactionStatus.expired, 'payment_succeeded')).toBeInstanceOf(Error)
-  })
-
-  it('pending → payment_succeeded (skipping processing) → Error', () => {
-    expect(transitionTransaction(TransactionStatus.pending, 'payment_succeeded')).toBeInstanceOf(Error)
   })
 })

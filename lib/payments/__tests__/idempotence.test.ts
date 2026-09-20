@@ -4,26 +4,23 @@ import { TransactionStatus } from '../types'
 
 // ---------------------------------------------------------------------------
 // Supabase DB mock — chain built bottom-up so the shape survives vi.clearAllMocks().
-// transaction-state-machine is intentionally NOT mocked: writeTransactionStatus
-// tests exercise the real business-rule validation embedded in that function.
+// transaction-state-machine is intentionally NOT mocked so writeTransactionStatus
+// exercises real business-rule validation logic.
 // ---------------------------------------------------------------------------
 const mockMaybeSingle = vi.fn()
-const mockSingle = vi.fn()
 
-// .eq() is self-referential so .eq().eq()...maybeSingle() all resolve correctly.
+// .select() on from() returns a builder that chains .eq().eq()...maybeSingle()
 const eqBuilder: Record<string, unknown> = { maybeSingle: mockMaybeSingle }
 const mockEq = vi.fn(() => eqBuilder)
-eqBuilder.eq = mockEq
+eqBuilder.eq = mockEq  // self-referential: .eq().eq()...
 
-// insert() → select() → single()
-const mockInsert = vi.fn(() => ({
-  select: vi.fn(() => ({ single: mockSingle })),
-}))
+// upsert() → select() → { data, error } (no .single() — returns array)
+const mockUpsertSelect = vi.fn()
+const mockUpsert = vi.fn(() => ({ select: mockUpsertSelect }))
 
-// from() → { select (for reads), insert (for writes) }
 const mockFrom = vi.fn(() => ({
   select: vi.fn(() => eqBuilder),
-  insert: mockInsert,
+  upsert: mockUpsert,
 }))
 
 vi.mock('@/lib/db/client', () => ({
@@ -69,12 +66,15 @@ describe('writeTransactionStatus — business validation', () => {
 
 // ---------------------------------------------------------------------------
 describe('upsertTransaction — idempotence', () => {
-  it('returns created: true on the first call and created: false on the next two with the same reference', async () => {
-    mockMaybeSingle
-      .mockResolvedValueOnce({ data: null, error: null })     // first find → row absent
-      .mockResolvedValueOnce({ data: baseRow, error: null })  // second find → row present
-      .mockResolvedValueOnce({ data: baseRow, error: null })  // third find → row present
-    mockSingle.mockResolvedValueOnce({ data: baseRow, error: null }) // INSERT response
+  it('returns created: true when upsert inserts, created: false when it conflicts', async () => {
+    // First call: DB returns the new row (INSERT succeeded).
+    mockUpsertSelect.mockResolvedValueOnce({ data: [baseRow], error: null })
+    // Second call: DB returns empty (ON CONFLICT DO NOTHING).
+    mockUpsertSelect.mockResolvedValueOnce({ data: [], error: null })
+    mockMaybeSingle.mockResolvedValueOnce({ data: baseRow, error: null })
+    // Third call: same conflict path.
+    mockUpsertSelect.mockResolvedValueOnce({ data: [], error: null })
+    mockMaybeSingle.mockResolvedValueOnce({ data: baseRow, error: null })
 
     const first = await upsertTransaction(upsertPayload)
     const second = await upsertTransaction(upsertPayload)
@@ -83,18 +83,18 @@ describe('upsertTransaction — idempotence', () => {
     expect(first.created).toBe(true)
     expect(second.created).toBe(false)
     expect(third.created).toBe(false)
-    // Exactly one INSERT across the three calls
-    expect(mockInsert).toHaveBeenCalledTimes(1)
+    // All three calls attempted the upsert; only the first inserted.
+    expect(mockUpsert).toHaveBeenCalledTimes(3)
   })
 
   it('inserts with payment_status = pending', async () => {
-    mockMaybeSingle.mockResolvedValueOnce({ data: null, error: null })
-    mockSingle.mockResolvedValueOnce({ data: baseRow, error: null })
+    mockUpsertSelect.mockResolvedValueOnce({ data: [baseRow], error: null })
 
     await upsertTransaction(upsertPayload)
 
-    expect(mockInsert).toHaveBeenCalledWith(
+    expect(mockUpsert).toHaveBeenCalledWith(
       expect.objectContaining({ payment_status: 'pending' }),
+      expect.any(Object),
     )
   })
 })

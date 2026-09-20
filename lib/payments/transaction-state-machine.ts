@@ -11,6 +11,8 @@ export type TransactionEvent =
 const VALID_TRANSITIONS: Record<TransactionStatus, Partial<Record<TransactionEvent, TransactionStatus>>> = {
   pending: {
     start_processing: 'processing',
+    payment_succeeded: 'succeeded',
+    payment_failed: 'failed',
   },
   processing: {
     payment_succeeded: 'succeeded',

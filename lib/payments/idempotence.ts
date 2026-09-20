@@ -54,24 +54,28 @@ export async function writeTransactionStatus(
   if (next instanceof Error) throw next
 
   const db = createServerClient()
-  const { count, error } = await db
+  const { data, error } = await db
     .from('transactions')
     .update({ payment_status: next })
     .eq('id', transactionId)
     .eq('payment_status', expectedCurrentStatus)
-    .select('id', { count: 'exact', head: true })
+    .select('id')
 
   if (error) throw error
-  return (count ?? 0) > 0 ? next : null
+  return data && data.length > 0 ? next : null
 }
 
 /**
- * Finds an existing transaction by gateway reference or creates it.
- * Protects against duplicate creation via the UNIQUE constraint on
- * (gateway_credential_id, external_id): a concurrent insert for the same
- * reference will fail at the DB level and be surfaced as a thrown error.
- * Returns { row, created: true } on first insert, { row, created: false }
- * on subsequent calls.
+ * Atomically finds an existing transaction by gateway reference or creates it.
+ *
+ * Uses INSERT … ON CONFLICT DO NOTHING RETURNING * so that concurrent calls
+ * with the same (gateway_credential_id, external_id) are safe: the DB decides
+ * which writer wins and the losers fall back to a SELECT.  The old
+ * find-then-insert pattern had a TOCTOU race that this eliminates.
+ *
+ * Conflict target depends on gateway_credential_id:
+ *   - non-null → UNIQUE (gateway_credential_id, external_id)
+ *   - null     → partial UNIQUE (external_id) WHERE gateway_credential_id IS NULL
  *
  * Called by initiatePayment() in S4 when SioPay itself initiates a payment
  * with the gateway and needs to record the transaction exactly once.
@@ -86,27 +90,42 @@ export async function upsertTransaction(payload: {
   amount: number
   currency: string
 }): Promise<{ row: TransactionRow; created: boolean }> {
-  const existing = await findTransactionByExternalId(
-    payload.external_id,
-    payload.gateway_credential_id ?? undefined,
-  )
-  if (existing) return { row: existing, created: false }
+  // Pick the right conflict target (see comment above).
+  const onConflict = payload.gateway_credential_id !== null
+    ? 'gateway_credential_id,external_id'
+    : 'external_id'
 
   const db = createServerClient()
   const { data, error } = await db
     .from('transactions')
-    .insert({
-      session_id: payload.session_id,
-      space_id: payload.space_id,
-      external_id: payload.external_id,
-      gateway_credential_id: payload.gateway_credential_id,
-      amount: payload.amount,
-      currency: payload.currency,
-      payment_status: 'pending',
-    })
+    .upsert(
+      {
+        session_id: payload.session_id,
+        space_id: payload.space_id,
+        external_id: payload.external_id,
+        gateway_credential_id: payload.gateway_credential_id,
+        amount: payload.amount,
+        currency: payload.currency,
+        payment_status: 'pending',
+      },
+      { onConflict, ignoreDuplicates: true },
+    )
     .select('id, session_id, space_id, external_id, gateway_credential_id, payment_status, amount, currency')
-    .single()
 
   if (error) throw error
-  return { row: data as TransactionRow, created: true }
+
+  // INSERT succeeded — new row returned.
+  if (data && data.length > 0) {
+    return { row: data[0] as TransactionRow, created: true }
+  }
+
+  // ON CONFLICT DO NOTHING — row already existed; fetch it.
+  const existing = await findTransactionByExternalId(
+    payload.external_id,
+    payload.gateway_credential_id ?? undefined,
+  )
+  if (!existing) throw new Error(
+    `upsertTransaction: conflict on (${payload.gateway_credential_id ?? 'null'}, ${payload.external_id}) but row not found`,
+  )
+  return { row: existing, created: false }
 }

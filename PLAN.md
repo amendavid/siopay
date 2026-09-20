@@ -170,6 +170,9 @@ vitest.config.ts
 - [ ] `logEvent` typé (`EventType`) en place, réutilisable par les semaines suivantes
 - [ ] **Test automatisé dédié** : tout event `payment_succeeded` ou `payment_failed` créé par la route webhook porte un `transaction_id` non nul — cette table alimente directement la timeline client (PRD §13, différenciateur principal), un événement de paiement sans tentative associée casserait la reconstruction de la timeline silencieusement
 - [ ] Tests automatisés couvrant tous ces cas, passant en CI
+- [x] Test d'intégration `upsertTransaction` concurrent (3× `Promise.all`) — volontairement hors CI : requiert un accès réseau à la base distante et un cleanup transactionnel ; même statut que les tests en argent réel de S4. À lancer manuellement via `npm run test:integration` avant chaque merge touchant `idempotence.ts`.
+
+> **Note :** la décision de garder ce test hors CI sera reconsidérée si un projet Supabase de staging séparé est mis en place — pas prévu dans le plan actuel, juste une piste à retenir.
 
 ---
 
