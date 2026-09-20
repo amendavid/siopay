@@ -98,6 +98,8 @@ Concrètement : le vendeur crée son compte chez l'agrégateur de son choix, fai
 - Le vendeur garde la relation contractuelle avec son agrégateur, ses conditions tarifaires, ses délais de retrait
 - Les retraits se passent entre le vendeur et son agrégateur, sur l'interface de ce dernier. SioPay n'a ni la visibilité technique (beaucoup d'agrégateurs n'exposent aucun statut au-delà du paiement reçu) ni l'intérêt de les afficher : montrer un statut de retrait laisserait croire que l'argent transite par SioPay, ce qui contredirait frontalement la promesse du produit
 
+Cette même absence de droit de débit est un choix assumé, pas seulement une contrainte technique : SioPay ne propose aucun mécanisme de remboursement en V1, précisément parce que rembourser exigerait une capacité de débit qui n'existe délibérément pas.
+
 ### L'invariant : SioPay ne détient jamais l'argent
 
 **Aucune fonctionnalité ne doit jamais introduire de détention de fonds, même transitoire.**
@@ -123,8 +125,11 @@ Le paiement est la partie du produit où une erreur coûte de l'argent réel à 
 **Exigences structurantes :**
 
 - **Idempotence** — un même webhook reçu plusieurs fois ne doit créer qu'une seule transaction. Les agrégateurs renvoient des webhooks en cas de doute, parfois plusieurs fois, parfois dans le désordre.
-- **Machine à états explicite** — une transaction a un cycle de vie clair, et les transitions invalides sont rejetées
-- **Vérification de signature** sur tous les webhooks entrants
+- **Deux machines à états distinctes, pas une seule** — le parcours d'achat (`checkout_sessions`) et la tentative de paiement (`transactions`) ont chacun leur propre cycle de vie et leurs propres transitions invalides rejetées. Une session expirée ou abandonnée ne se rouvre que si une transaction réussie arrive en retard ; une transaction restée sans réponse définitive passe à un statut d'attente distinct d'un échec confirmé.
+- **Le webhook comme déclencheur, jamais comme source de vérité** — chaque agrégateur signe ses webhooks différemment (certains via un header HMAC, d'autres via un mécanisme entièrement différent embarqué dans le corps de la réponse). Plutôt que d'implémenter et maintenir un schéma de vérification propre à chaque passerelle, SioPay ne fait jamais confiance au contenu d'un webhook entrant : à sa réception, seul l'identifiant de référence en est extrait, puis une requête authentifiée par les clés API du vendeur interroge directement la passerelle pour connaître le statut réel. Un webhook forgé ne peut déclencher qu'une vérification légitime, jamais en falsifier le résultat.
+- **Cette vérification est la même que celle du polling** — le webhook n'est qu'un déclenchement immédiat de la fonction que le polling exécute de toute façon à intervalles réguliers en filet de sécurité.
+- **L'endpoint webhook doit se protéger activement contre l'abus** — n'ouvrant plus la porte à une vérification cryptographique de l'origine, il doit rejeter sans appel sortant toute référence inconnue ou déjà résolue, limiter la fréquence de vérification par tentative de paiement, et appliquer un rate limiting général sur l'endpoint.
+- **Résistance à l'écriture concurrente** — un déclenchement webhook et un cycle de polling programmé peuvent se chevaucher sur la même tentative. Une écriture non protégée par une vérification de l'état attendu risque de perdre silencieusement l'une des deux mises à jour.
 - **Aucune corruption silencieuse** — un montant mal typé, une devise inattendue, un champ manquant doivent être détectés et loggés, jamais absorbés discrètement
 - **Observabilité** — quand quelque chose casse, on doit pouvoir dire quoi, quand et pour quelle transaction, sans reconstituer à la main
 

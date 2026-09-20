@@ -117,19 +117,20 @@ lib/crypto/encrypt.ts          ← chiffrement/déchiffrement credentials
 
 2. **Types & contrats** — `lib/payments/types.ts` : enum `TransactionStatus` (pending, processing, succeeded, failed, abandoned, refunded), enum `FailureReason`, type `PaymentWebhookPayload`. Ces types sont le contrat de l'interface gateway — écrire les tests dessus avant le code.
 
-3. **Machine à états** — `lib/payments/state-machine.ts` :
-   - Fonction pure `transition(current: TransactionStatus, event: TransactionEvent): TransactionStatus | Error`
-   - Table des transitions valides (matrice d'adjacence)
-   - Retourne une erreur typée si la transition est invalide — jamais d'exception silencieuse
+3. **Deux machines à états** — `lib/payments/session-state-machine.ts` et `lib/payments/transaction-state-machine.ts` :
+   - `checkout_sessions.status` : `ouverte` → `reussie` / `abandonnee` / `expiree`, avec réouverture `expiree`/`abandonnee` → `reussie` uniquement si une transaction `succeeded` arrive en retard
+   - `transactions.payment_status` : `pending` → `processing` → `succeeded` / `failed` / `expired`, avec `expired` → `succeeded`/`failed` uniquement via un webhook tardif (jamais via un nouveau polling sur une transaction déjà expirée)
+   - Chaque fonction retourne une erreur typée sur transition invalide, jamais d'exception silencieuse
 
-4. **Idempotence** — `lib/payments/idempotence.ts` :
-   - Contrainte `UNIQUE` sur `transactions (gateway_credential_id, external_id)` — révisé lors de la relecture d'ensemble (`docs/schema-design-notes.md`) : scopé par connexion pour éviter une collision entre deux agrégateurs différents, complété par un index partiel pour le cas `gateway_credential_id null` (offre gratuite)
-   - Fonction `upsertTransaction(payload)` : cherche d'abord par `(gateway_credential_id, external_id)`, retourne l'existant si trouvé, crée sinon
-   - Le noyau de livraison et de stats n'est déclenché qu'à la première insertion, pas sur les doublons
+4. **Idempotence & concurrence** — `lib/payments/idempotence.ts` :
+   - Contrainte `UNIQUE` sur `transactions (gateway_credential_id, external_id)`, complétée par un index partiel pour le cas `gateway_credential_id null`
+   - Fonction `upsertTransaction(payload)` : cherche d'abord par `(gateway_credential_id, external_id)`, retourne l'existant si trouvé
+   - **Écriture conditionnelle (compare-and-swap)** sur `payment_status` : chaque transition s'écrit avec une clause `WHERE payment_status = $statut_attendu`. Si 0 ligne affectée, relire l'état réel et rejouer `transition()` dessus plutôt que d'écraser — protège contre un webhook et un polling qui écrivent au même moment
 
-5. **Vérification de signature** — `lib/payments/webhook-verification.ts` :
-   - Fonction `verifySignature(payload: string, signature: string, secret: string): boolean` (HMAC-SHA256)
-   - Signature invalide → rejeter immédiatement, loguer via Sentry (sans le payload brut)
+5. **Vérification d'authenticité par appel sortant** — `lib/payments/verify-transaction.ts` :
+   - Fonction `verifyAndFetchStatus(externalId)` : n'extrait du webhook reçu que l'identifiant de référence, jamais un champ de statut. Appelle ensuite `gateway.getTransactionStatus(externalId)` — la même fonction utilisée par le polling — pour obtenir le statut réel, authentifié par les clés API du vendeur
+   - Avant tout appel sortant : rejeter silencieusement (200 OK, aucune action) toute référence inconnue en base ou déjà dans un statut terminal (`succeeded`/`failed`)
+   - Anti-rafale : au plus une vérification réelle par transaction par intervalle minimal configurable, même en cas de rafale de webhooks (légitimes ou forgés) sur la même référence
 
 6. **Validation des montants** — `lib/payments/validation.ts` :
    - Vérifier que `amount` est un entier positif
@@ -159,8 +160,12 @@ vitest.config.ts
 - [ ] Transitions invalides rejetées avec erreur typée
 - [ ] Idempotence par `external_id` : même payload webhook envoyé 3× = une seule transaction
 - [ ] Désordre géré : webhook `succeeded` reçu avant `processing` traité correctement
-- [ ] Vérification de signature HMAC sur tous les webhooks entrants
-- [ ] Signature invalide → rejetée et loggée sans exposer le payload brut
+- [ ] **Test de concurrence** : un webhook et un polling arrivant au même moment sur la même transaction ne produisent jamais de lost update
+- [ ] Transitions invalides rejetées sur les deux machines, y compris aucune transition vers un statut de remboursement (hors périmètre V1)
+- [ ] Webhook entrant : seule la référence est extraite, jamais un champ de statut du payload
+- [ ] Référence inconnue ou déjà terminale → rejetée sans appel sortant
+- [ ] Anti-rafale par transaction actif, testé avec une rafale simulée
+- [ ] Rate limiting sur l'endpoint webhook
 - [ ] Montant mal typé → détecté et logué, jamais silencieusement corrompu
 - [ ] `logEvent` typé (`EventType`) en place, réutilisable par les semaines suivantes
 - [ ] **Test automatisé dédié** : tout event `payment_succeeded` ou `payment_failed` créé par la route webhook porte un `transaction_id` non nul — cette table alimente directement la timeline client (PRD §13, différenciateur principal), un événement de paiement sans tentative associée casserait la reconstruction de la timeline silencieusement
@@ -195,17 +200,19 @@ vitest.config.ts
    - Adapter les codes de statut et d'erreur vers le vocabulaire interne
    - Les credentials sont lus depuis les `gateway_credentials` chiffrées, jamais depuis les variables d'environnement directement
 
-4. **Registre des gateways** — `lib/payments/gateways/index.ts` : map `{ [name]: GatewayImpl }` pour que le webhook handler résolve la bonne implémentation depuis le paramètre d'URL `[gateway]`.
+4. **Polling minimal** — `lib/payments/polling.ts` : sans Inngest (qui n'arrive qu'en S9-S10), un mécanisme simple qui réinterroge le statut à intervalles espacés, un nombre de tentatives borné, et laisse `payment_status = expired` si aucune réponse définitive à la fin. Sera remplacé par une fonction Inngest en S9-S10 — pas une nouvelle conception à ce moment-là, juste un changement d'exécution.
 
-5. **Widget inline** — intégration dans un placeholder de checkout (le checkout complet vient en S7). Pour l'instant, une page de test suffisante pour déclencher un vrai paiement.
+5. **Registre des gateways** — `lib/payments/gateways/index.ts` : map `{ [name]: GatewayImpl }` pour que le webhook handler résolve la bonne implémentation depuis le paramètre d'URL `[gateway]`.
 
-6. **Flag `is_test`** — booléen sur `transactions`. Les transactions avec `is_test = true` sont exclues de toutes les stats et agrégations.
+6. **Widget inline** — intégration dans un placeholder de checkout (le checkout complet vient en S7). Pour l'instant, une page de test suffisante pour déclencher un vrai paiement.
 
-7. **Test en argent réel** — déclencher un paiement de faible montant, vérifier l'enregistrement en base, provoquer un échec et vérifier la `failure_reason`.
+7. **Flag `is_test`** — booléen sur `transactions`. Les transactions avec `is_test = true` sont exclues de toutes les stats et agrégations.
 
-8. **Vérification Sentry** — contrôler dans le dashboard Sentry qu'aucune donnée sensible n'est loggée.
+8. **Test en argent réel** — déclencher un paiement de faible montant, vérifier l'enregistrement en base, provoquer un échec et vérifier la `failure_reason`.
 
-9. **Rate limiting basique** — `lib/rate-limit.ts` : compteur en mémoire par IP, appliqué dans `middleware.ts` sur les routes `/api/webhooks/*` et `/c/[slug]`. Pas de dépendance externe — un `Map` avec TTL côté serveur suffit pour cette protection initiale. En S17, ce module sera remplacé par `@upstash/ratelimit` pour une protection généralisée et persistante.
+9. **Vérification Sentry** — contrôler dans le dashboard Sentry qu'aucune donnée sensible n'est loggée.
+
+10. **Rate limiting basique** — `lib/rate-limit.ts` : compteur en mémoire par IP, appliqué dans `middleware.ts` sur les routes `/api/webhooks/*` et `/c/[slug]`. Pas de dépendance externe — un `Map` avec TTL côté serveur suffit pour cette protection initiale. En S17, ce module sera remplacé par `@upstash/ratelimit` pour une protection généralisée et persistante.
 
 **Modules concernés :**
 ```
@@ -227,6 +234,7 @@ middleware.ts                              ← enrichi avec rate limiting
 - [ ] Un vrai paiement de petit montant effectué et enregistré correctement en base
 - [ ] Flag `is_test` fonctionnel, transactions de test exclues des stats
 - [ ] Un échec réel provoqué et correctement enregistré avec sa `failure_reason`
+- [ ] Polling minimal fonctionnel : une transaction sans webhook reçu finit par passer à `expired` après le nombre de tentatives prévu
 - [ ] Aucune donnée sensible en clair dans les logs Sentry
 - [ ] Rate limiting basique actif sur `/api/webhooks/*` et `/c/[slug]`
 
@@ -595,7 +603,7 @@ app/(dashboard)/settings/webhooks/
 
 **Critères de validation :**
 - [ ] URL de webhook configurable par compte
-- [ ] Événements sortants : `payment_succeeded`, `payment_failed`, `refund_issued`
+- [ ] Événements sortants : `payment_succeeded`, `payment_failed` (pas de `refund_issued` — SioPay ne gère pas le remboursement, décision du 20 sept)
 - [ ] Payload signé HMAC-SHA256, aucune donnée sensible
 - [ ] Retry avec backoff via Inngest
 - [ ] Log de livraison visible côté vendeur
