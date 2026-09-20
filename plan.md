@@ -70,6 +70,8 @@
    - `0023_promo_codes.sql` — table `promo_codes` (id, space_id → `spaces`, code unique par espace, payment_link_id/offer_id — au plus un —, customer_id nullable, max_uses, uses_count, discount_type, discount_amount, discount_currency, discount_percentage, source, is_active, expires_at, created_at, updated_at)
    - `0024_promo_code_uses.sql` — table `promo_code_uses` (id, promo_code_id → `promo_codes`, session_id → `checkout_sessions` unique, space_id → `spaces` [dérivé], customer_id → `customers` [dérivé], discount_applied_amount, discount_applied_currency, created_at)
 
+   - `0025_table_grants.sql` — `GRANT` explicites sur les tables : `service_role` en lecture/écriture, `authenticated` en lecture (sauf `reserved_slugs`, `gateway_credentials`, `integrations`, `visit_dedup`), `anon` en lecture sur les 6 tables de référence publiques. Ajoutée après coup : les privilèges de table manquaient sur le distant (« permission denied » même pour le service role), découvert au test RLS.
+
    Détail complet de chaque table (colonnes, contraintes, triggers, RLS) dans `docs/schema-design-notes.md` — cette liste ne donne que l'ordre et les colonnes principales.
 
 4. **Chiffrement des credentials** — chiffrement au niveau applicatif avec `libsodium-wrappers` : la clé de chiffrement est une variable d'environnement serveur (`ENCRYPTION_KEY`). Les credentials ne sont jamais stockés en clair. Helpers dans `lib/crypto/encrypt.ts`. S'applique à `gateway_credentials` **et** `integrations` (même mécanisme, principe généralisé dans `AGENTS.md`).
@@ -90,18 +92,18 @@ lib/crypto/encrypt.ts          ← chiffrement/déchiffrement credentials
 ```
 
 **Critères de validation :**
-- [ ] Les 24 tables créées, dans l'ordre : `currencies`, `reserved_slugs`, `gateways`, `processors`, `countries`, `accounts`, `payment_methods`, `plans`, `account_plans`, `spaces`, `gateway_credentials`, `integrations`, `customers`, `offers`, `payment_links`, `sales_pages`, `checkout_sessions`, `transactions`, `deliveries`, `daily_visit_counts`, `visit_dedup`, `events`, `promo_codes`, `promo_code_uses`
-- [ ] Identité client résolue par email normalisé (jamais par téléphone), **par espace** : un même acheteur sur plusieurs tentatives dans le même espace = un seul `customer_id` ; deux espaces distincts d'un même compte le traitent comme deux clients séparés (choix assumé, PRD §8)
-- [ ] `payment_status` (sur `transactions`, par tentative) et `delivery_status` (sur `checkout_sessions`, par parcours d'achat) restent distincts — **plus sur la même table** depuis la restructuration session/tentative (`docs/schema-design-notes.md`)
-- [ ] `events` prêt à recevoir : `checkout_started`, `checkout_step_completed`, `payment_attempted`, `payment_succeeded`, `payment_failed` — **pas `page_view`** : le trafic de page (impressions) vit dans `daily_visit_counts`/`visit_dedup`, pas dans `events`, pour ne jamais faire exploser son volume d'écriture avec une campagne sponsorisée (`docs/schema-design-notes.md`)
-- [ ] Relation Offre → Lien de paiement → Page de vente (page optionnelle)
-- [ ] Devise de zone au niveau du compte, devise déclarée par passerelle
-- [ ] Aucun montant stocké sans sa devise
-- [ ] RLS activée sur les 24 tables, sans exception — `for select` uniquement, aucune policy d'écriture (l'ownership en écriture se vérifie côté app avant l'appel au service role, `docs/schema-design-notes.md` Section B)
-- [ ] RLS testée : compte A ne peut jamais lire les données du compte B (un compte avec plusieurs espaces voit ses propres espaces, c'est attendu — l'isolation est par compte/utilisateur, pas par espace)
-- [ ] Credentials passerelles **et intégrations** chiffrés en base, jamais en clair (`gateway_credentials` et `integrations`, même mécanisme)
-- [ ] Types TypeScript générés depuis le schéma local
-- [ ] Migrations versionnées dans le repo
+- [x] Les 24 tables créées, dans l'ordre : `currencies`, `reserved_slugs`, `gateways`, `processors`, `countries`, `accounts`, `payment_methods`, `plans`, `account_plans`, `spaces`, `gateway_credentials`, `integrations`, `customers`, `offers`, `payment_links`, `sales_pages`, `checkout_sessions`, `transactions`, `deliveries`, `daily_visit_counts`, `visit_dedup`, `events`, `promo_codes`, `promo_code_uses`
+- [x] Identité client résolue par email normalisé (jamais par téléphone), **par espace** : un même acheteur sur plusieurs tentatives dans le même espace = un seul `customer_id` ; deux espaces distincts d'un même compte le traitent comme deux clients séparés (choix assumé, PRD §8)
+- [x] `payment_status` (sur `transactions`, par tentative) et `delivery_status` (sur `checkout_sessions`, par parcours d'achat) restent distincts — **plus sur la même table** depuis la restructuration session/tentative (`docs/schema-design-notes.md`)
+- [x] `events` prêt à recevoir : `checkout_started`, `checkout_step_completed`, `payment_attempted`, `payment_succeeded`, `payment_failed` — **pas `page_view`** : le trafic de page (impressions) vit dans `daily_visit_counts`/`visit_dedup`, pas dans `events`, pour ne jamais faire exploser son volume d'écriture avec une campagne sponsorisée (`docs/schema-design-notes.md`)
+- [x] Relation Offre → Lien de paiement → Page de vente (page optionnelle)
+- [x] Devise de zone au niveau du compte, devise déclarée par passerelle
+- [x] Aucun montant stocké sans sa devise
+- [x] RLS activée sur les 24 tables, sans exception — `for select` uniquement, aucune policy d'écriture (l'ownership en écriture se vérifie côté app avant l'appel au service role, `docs/schema-design-notes.md` Section B)
+- [x] RLS testée : compte A ne peut jamais lire les données du compte B (un compte avec plusieurs espaces voit ses propres espaces, c'est attendu — l'isolation est par compte/utilisateur, pas par espace)
+- [~] Credentials passerelles **et intégrations** chiffrés en base — **reporté à S9/S11** : les colonnes `credentials_encrypted bytea` existent, mais `lib/crypto/encrypt.ts` et `libsodium-wrappers` ne sont écrits qu'au moment où ces tables sont réellement utilisées. À cocher à ce moment-là, pas avant.
+- [x] Types TypeScript générés depuis le schéma distant (`supabase gen types typescript --linked`)
+- [x] Migrations versionnées dans le repo
 
 ---
 
